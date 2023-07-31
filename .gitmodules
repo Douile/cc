@@ -1,0 +1,3 @@
+[submodule "cc-tweaked"]
+	path = cc-tweaked
+	url = https://github.com/cc-tweaked/CC-Tweaked.git

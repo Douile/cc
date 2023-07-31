@@ -1,0 +1,3 @@
+{
+  "workspace.library": ["./cc-tweaked/projects/core/src/main/resources/data/computercraft/lua/bios.lua"]
+}
