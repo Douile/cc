@@ -1,7 +1,19 @@
+-- Imports
+
+-- local settings = require("settings")
+-- local turtle = require("turtle")
+-- local vector = require("vector")
+
+-- TODO:
+-- - Refuel and collect blocks from HOME
+-- - Add Z axis (multiple floors)
+-- - Send state over network
+
 -- Floor settings
-local RADIUS = 3
+local RADIUS = 4
 local BLOCK_FLOOR = "minecraft:deepslate_bricks"
 local BLOCK_FLOOR_LIGHT = "projectred_illumination:red_inverted_illumar_lamp"
+local HOME = vector.new(3, 3, 0)
 
 -- Constants
 local INV_SIZE = 16
@@ -20,26 +32,83 @@ local FACES = {
 	{ x = 0, y = -1 },
 }
 
+local FILE_NAME = "floor-state"
+
 -- Variables
+
+function posAsN(pos)
+	return (pos["y"] * SIZE) + pos["x"]
+end
 
 settings.load("floor-state")
 
-g_floor = settings.get("floor", nil)
-if floor == nil then
-	-- Initialize floor
-	-- 0-based floor array
-	g_floor = {}
-	for y = 0, SIZE do
-		local y_offset = y * SIZE
-		for x = 0, SIZE do
-			g_floor[y_offset + x] = BLOCK_UNKNOWN
-		end
-	end
-	settings.get("floor", g_floor)
+g_floor = {}
+g_pos = vector.new(RADIUS, RADIUS, 0)
+g_facing = 0
+
+function loadState()
+  settings.load(FILE_NAME)
+
+  g_floor = settings.get("floor", nil)
+  if g_floor == nil then
+    -- Initialize floor
+    -- 0-based floor array
+    g_floor = {}
+    for y = 0, SIZE do
+      local y_offset = y * SIZE
+      for x = 0, SIZE do
+        g_floor[y_offset + x] = BLOCK_UNKNOWN
+      end
+    end
+  else
+    for y = 0, SIZE do
+      for x = 0, SIZE do
+        local n = posAsN({ x=x, y=y })
+        if g_floor[n] == BLOCK_WALL then
+          g_floor[n-1] = BLOCK_WALL
+        end
+        g_floor[n] = BLOCK_UNKNOWN
+      end
+    end
+  end
+
+  g_pos = settings.get("pos", g_pos)
+  g_facing = settings.get("facing", g_facing)
 end
 
-g_pos = settings.get("pos", { x = RADIUS, y = RADIUS })
-g_facing = settings.get("facing", 0)
+function serializeFloor(floor)
+  r = {}
+  for y=0,SIZE do
+    for x=0,SIZE do
+      local n = posAsN({ x = x, y = y })
+      if floor[n] == BLOCK_WALL then
+        r[n+1] = BLOCK_WALL
+      end
+    end
+  end
+  return r
+end
+
+function saveState()
+	settings.set("floor", serializeFloor(g_floor))
+	settings.set("pos", g_pos)
+	settings.set("facing", g_facing)
+  settings.set("radius", RADIUS)
+	settings.save(FILE_NAME)
+end
+
+loadState()
+print(string.format("Restored state: %d,%d (%d)", g_pos["x"], g_pos["y"], g_facing))
+print("Continue (y/N)?")
+if read() ~= "y" then
+  print("Clear state (Y/n)? ")
+  if read() ~= "n" then
+    settings.load(FILE_NAME)
+    settings.clear()
+    settings.save(FILE_NAME)
+  end
+  exit()
+end
 
 -- Filters
 function wallsToBreak(blockName)
@@ -152,18 +221,15 @@ function checkFuel()
 	end
 end
 
-function posAsN(pos)
-	return (pos["y"] * SIZE) + pos["x"]
-end
 
 -- Update map position
-function updatePos(pos, value)
-	g_floor[posAsN(pos)] = value
+function updatePos(floor, pos, value)
+	floor[posAsN(pos)] = value
 end
 
 -- Get map position
-function getPos(pos)
-	return g_floor[posAsN(pos)]
+function getPos(floor, pos)
+	return floor[posAsN(pos)]
 end
 
 function addPos(a, b)
@@ -175,7 +241,7 @@ function addValidEdge(edges, pos, offset)
 	local face = FACES[newDir + 1]
 	local p = addPos(pos, face)
 	p["face"] = newDir
-	if p["x"] <= SIZE and p["x"] >= 0 and p["y"] <= SIZE and p["y"] >= 0 then
+	if p["x"] < SIZE and p["x"] >= 0 and p["y"] < SIZE and p["y"] >= 0 then
 		table.insert(edges, p)
 	else
 		--print(string.format("Edge %d,%d not valid", p["x"], p["y"]))
@@ -193,8 +259,8 @@ end
 
 -- Find BFS nearest unexplored
 -- https://en.wikipedia.org/wiki/Breadth-first_search
-function bfsUnexplored(pos, facing)
-	if getPos(pos) == BLOCK_UNKNOWN then
+function bfs(floor, isGoal, pos, facing)
+	if isGoal(floor, pos) then
 		return {}
 	end
 
@@ -211,7 +277,7 @@ function bfsUnexplored(pos, facing)
 		end
 
 		-- If v is goal
-		if getPos(v) == BLOCK_UNKNOWN then
+		if isGoal(floor, v) then
 			return v
 		end
 
@@ -221,7 +287,7 @@ function bfsUnexplored(pos, facing)
 			--print(string.format("valid edge %d,%d", edge["x"], edge["y"]))
 			if not visited[posAsN(edge)] then
 				visited[posAsN(edge)] = true
-				if getPos(edge) ~= BLOCK_WALL then
+				if getPos(floor, edge) ~= BLOCK_WALL then
 					edge["parent"] = v
 					table.insert(queue, edge)
 				else
@@ -232,13 +298,21 @@ function bfsUnexplored(pos, facing)
 	end
 end
 
-function moveToClosestUnexplored()
-	local moveStack = bfsUnexplored(g_pos, g_facing)
-	if moveStack == nil then
+function isUnexplored(floor, pos)
+  return getPos(floor, pos) == BLOCK_UNKNOWN
+end
+
+function isHome(floor, pos)
+  return pos["x"] == HOME["x"] and pos["y"] == HOME["y"]
+end
+
+function moveToGoal(floor, isGoal)
+	local moveStack = bfs(floor, isGoal, g_pos, g_facing)
+	if moveStack == nil or moveStack["x"] == nil or moveStack["y"] == nil then
 		return false
 	end
 
-	print(string.format("Travelling to %d,%d from %d,%d", moveStack["x"], moveStack["y"], g_pos["x"], g_pos["y"]))
+	--print(string.format("Travelling to %s,%s from %s,%s", tostring(moveStack["x"]), tostring(moveStack["y"]), tostring(g_pos["x"]), tostring(g_pos["y"])))
 
 	local ordered = {}
 	local node = moveStack
@@ -249,9 +323,9 @@ function moveToClosestUnexplored()
 	end
 
 	for i, node in pairs(ordered) do
-		print(string.format("  %d,%d (%d)", node["x"], node["y"], node["face"]))
+		--print(string.format("  %d,%d (%d)", node["x"], node["y"], node["face"]))
 		if i > 1 then
-			print(string.format("  at %d,%d", node["x"], node["y"]))
+			--print(string.format("  at %d,%d", node["x"], node["y"]))
 			if between(g_facing + 1, 4) == node["face"] then
 				turnRight()
 			end
@@ -261,7 +335,7 @@ function moveToClosestUnexplored()
 
 			-- Do movement
 			if not forward() then
-				updatePos(addPos(g_pos, FACES[g_facing + 1]), BLOCK_WALL)
+				updatePos(floor, addPos(g_pos, FACES[g_facing + 1]), BLOCK_WALL)
 				return true
 			end
 		end
@@ -282,7 +356,8 @@ function printPercentages()
 			explored = explored + 1
 		end
 	end
-	print(
+  term.clearLine()
+	term.write(
 		string.format(
 			"Status explored=%d/%d (%d%%) blocked=%d%%",
 			explored,
@@ -293,24 +368,63 @@ function printPercentages()
 	)
 end
 
-function updateSettings()
-	settings.set("floor", g_floor)
-	settings.set("pos", g_pos)
-	settings.set("facing", g_facing)
-	settings.save("floor-state")
+print("Check walls (y/N)? ")
+if read() == "y" then
+  printPercentages()
+  customFloor = {}
+  for y=0,SIZE do
+    for x=0,SIZE do
+      local p = getPos(g_floor, {x=x,y=y})
+      if p == BLOCK_WALL then
+        updatePos(customFloor, {x=x, y=y}, BLOCK_UNKNOWN)
+      else
+        updatePos(customFloor, {x=x, y=y}, BLOCK_CORRECT)
+      end
+    end
+  end
+
+  while moveToGoal(customFloor, isUnexplored) do
+    checkFuel()
+  end
+
+  -- Convert floor back
+  for y=0,SIZE do
+    for x=0,SIZE do
+      local p = getPos(customFloor, {x=x,y=y})
+      if p == BLOCK_WALL then
+        updatePos(g_floor, {x=x,y=y}, BLOCK_WALL)
+      else
+        updatePos(g_floor, {x=x,y=y}, BLOCK_UNKNOWN)
+      end
+    end
+  end
+
+  printPercentages()
+
+  print("Walls done")
 end
+
 
 -- Main loop
 while true do
 	printPercentages()
 	checkFuel()
 	if placeFloorBlock() then
-		updatePos(g_pos, BLOCK_CORRECT)
+		updatePos(g_floor, g_pos, BLOCK_CORRECT)
 	end
-	updateSettings()
-	if not moveToClosestUnexplored() then
+	saveState()
+	if not moveToGoal(g_floor, isUnexplored) then
 		break
 	end
 end
 
 print("Nowhere left to go")
+
+while moveToGoal(g_floor, isHome) do
+  checkFuel()
+  saveState()
+end
+
+saveState()
+
+print("HOME")
